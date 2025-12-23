@@ -5,11 +5,10 @@ import nest_asyncio
 from flask import Flask
 from threading import Thread
 import edge_tts
-# အောက်ပါ Import စာကြောင်းတွေ ကျန်ခဲ့လို့ Error တက်တာပါ
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# 1. Flask App for Render Keep-Alive
+# 1. Flask App for Keep-Alive
 app = Flask(__name__)
 
 @app.route('/')
@@ -24,43 +23,78 @@ def keep_alive():
     t = Thread(target=run_flask)
     t.start()
 
-# 2. Telegram Bot Logic
-# Token ကို Environment Variable ကနေ ယူမယ်
+# 2. Configuration & Variables
 TOKEN = os.environ.get("BOT_TOKEN")
-
 if not TOKEN:
     raise ValueError("No BOT_TOKEN found in environment variables!")
 
-# Logging setup
+# User တွေရဲ့ Voice ရွေးချယ်မှုကို ဒီမှာ ယာယီသိမ်းပါမယ်
+# Format: { chat_id: "voice_id" }
+user_preferences = {}
+
+# Voice Constants
+VOICE_MALE = "my-MM-ThihaNeural"
+VOICE_FEMALE = "my-MM-NularNeural"
+
+# Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+# --- Bot Functions ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Mingalarpar! စာပို့လိုက်ရင် အသံဖိုင် ပြောင်းပေးပါမယ်။")
+    welcome_text = (
+        "မင်္ဂလာပါ! စာပို့လိုက်ရင် အသံဖိုင် ပြောင်းပေးပါမယ်။\n\n"
+        "အသံပြောင်းချင်ရင် /voice လို့ ရိုက်ပါ (သို့) Menu ကနေ ရွေးပါ။"
+    )
+    await update.message.reply_text(welcome_text)
+
+# Voice ရွေးတဲ့ ခလုတ်ပြမယ့် Function
+async def voice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("👨 Thiha (Male)", callback_data=VOICE_MALE)],
+        [InlineKeyboardButton("👩 Nular (Female)", callback_data=VOICE_FEMALE)]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("အသံရွေးချယ်ပါ (Choose Voice):", reply_markup=reply_markup)
+
+# ခလုတ်နှိပ်လိုက်ရင် အလုပ်လုပ်မယ့် Function
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer() # Button loading circle ပျောက်အောင်လုပ်ခြင်း
+
+    selected_voice = query.data
+    chat_id = query.message.chat.id
+    
+    # User ရွေးလိုက်တဲ့ အသံကို Dictionary ထဲမှာ သိမ်းမယ်
+    user_preferences[chat_id] = selected_voice
+    
+    voice_name = "Thiha (Male)" if selected_voice == VOICE_MALE else "Nular (Female)"
+    
+    # Message ကို ပြင်ပြီး အသိပေးမယ်
+    await query.edit_message_text(text=f"✅ အသံကို **{voice_name}** သို့ ပြောင်းလဲလိုက်ပါပြီ။")
 
 async def text_to_speech(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    
-    # စာမပါရင် (ဥပမာ - Sticker) ဘာမှ မလုပ်ဘူး
     if not text:
-        await update.message.reply_text("ကျေးဇူးပြုပြီး စာသား (Text) သီးသန့် ပို့ပေးပါ။")
+        await update.message.reply_text("စာသား (Text) သီးသန့် ပို့ပေးပါခင်ဗျာ။")
         return
 
     chat_id = update.message.chat_id
-    await update.message.reply_text("Processing...")
+    
+    # User က ဘာရွေးထားလဲ စစ်မယ်။ မရွေးရသေးရင် Default (Male) ယူမယ်
+    voice = user_preferences.get(chat_id, VOICE_MALE)
+    
+    await update.message.reply_text(f"Processing... ({'Male' if voice == VOICE_MALE else 'Female'})")
 
     output_file = f"{chat_id}.mp3"
     
-    # Voice ID (မြန်မာအသံ လိုချင်ရင် 'my-MM-ThihaNeural' လို့ ပြောင်းပါ)
-    voice = "my-MM-ThihaNeural" 
-
     try:
         communicate = edge_tts.Communicate(text, voice)
         await communicate.save(output_file)
         
-        # Audio ဖိုင်ရမရ စစ်ဆေးခြင်း
         if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
             await update.message.reply_voice(voice=open(output_file, 'rb'))
-            os.remove(output_file) # ပြီးရင် ဖျက်မယ်
+            os.remove(output_file)
         else:
             await update.message.reply_text("Error: Audio file creation failed.")
 
@@ -72,11 +106,14 @@ async def main():
     nest_asyncio.apply()
     application = Application.builder().token(TOKEN).build()
 
+    # Handlers
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("voice", voice_menu)) # /voice command အသစ်
+    application.add_handler(CallbackQueryHandler(button_callback)) # Button နှိပ်တာကို နားထောင်ဖို့
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_to_speech))
 
     await application.run_polling()
 
 if __name__ == "__main__":
-    keep_alive() # Start Flask server
-    asyncio.run(main()) # Start Bot
+    keep_alive()
+    asyncio.run(main())
