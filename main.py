@@ -5,10 +5,11 @@ import nest_asyncio
 from flask import Flask
 from threading import Thread
 import edge_tts
-from telegram import Update, ReplyKeyboardMarkup
+# အောက်ပါ Import စာကြောင်းတွေ ကျန်ခဲ့လို့ Error တက်တာပါ
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# 1. Flask App for Keep-Alive
+# 1. Flask App for Render Keep-Alive
 app = Flask(__name__)
 
 @app.route('/')
@@ -23,99 +24,59 @@ def keep_alive():
     t = Thread(target=run_flask)
     t.start()
 
-# 2. Configuration
+# 2. Telegram Bot Logic
+# Token ကို Environment Variable ကနေ ယူမယ်
 TOKEN = os.environ.get("BOT_TOKEN")
+
 if not TOKEN:
     raise ValueError("No BOT_TOKEN found in environment variables!")
 
-# Voice Constants
-VOICE_MALE = "my-MM-ThihaNeural"
-VOICE_FEMALE = "my-MM-NularNeural"
-
-# User Settings (Memory)
-user_preferences = {}
-
-# Logging
+# Logging setup
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- Bot Functions ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # အောက်ဆုံးမှာ အမြဲပေါ်နေမယ့် Menu ခလုတ်များ
-    keyboard = [
-        ["👨 Male Voice (Thiha)", "👩 Female Voice (Nular)"],
-        ["ℹ️ Current Settings"]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    
-    await update.message.reply_text(
-        "မင်္ဂလာပါ! စာပို့လိုက်ရင် အသံဖိုင် ပြောင်းပေးပါမယ်။\n\n"
-        "အောက်က ခလုတ်တွေနဲ့ အသံပြောင်းလို့ရပါတယ် 👇", 
-        reply_markup=reply_markup
-    )
+    await update.message.reply_text("Mingalarpar! စာပို့လိုက်ရင် အသံဖိုင် ပြောင်းပေးပါမယ်။")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def text_to_speech(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    
+    # စာမပါရင် (ဥပမာ - Sticker) ဘာမှ မလုပ်ဘူး
+    if not text:
+        await update.message.reply_text("ကျေးဇူးပြုပြီး စာသား (Text) သီးသန့် ပို့ပေးပါ။")
+        return
+
     chat_id = update.message.chat_id
-    
-    # ၁။ ခလုတ်နှိပ်တာလား စစ်မယ်
-    if text == "👨 Male Voice (Thiha)":
-        user_preferences[chat_id] = VOICE_MALE
-        await update.message.reply_text("✅ အသံကို **Thiha (Male)** သို့ ပြောင်းလိုက်ပါပြီ။")
-        return
-        
-    elif text == "👩 Female Voice (Nular)":
-        user_preferences[chat_id] = VOICE_FEMALE
-        await update.message.reply_text("✅ အသံကို **Nular (Female)** သို့ ပြောင်းလိုက်ပါပြီ။")
-        return
-
-    elif text == "ℹ️ Current Settings":
-        current_voice = user_preferences.get(chat_id, VOICE_MALE)
-        voice_name = "Thiha (Male)" if current_voice == VOICE_MALE else "Nular (Female)"
-        await update.message.reply_text(f"လက်ရှိသုံးထားသော အသံ: **{voice_name}**")
-        return
-
-    # ၂။ ခလုတ်မဟုတ်ရင် TTS လုပ်မယ်
-    # Default Voice ယူမယ်
-    voice = user_preferences.get(chat_id, VOICE_MALE)
-    
-    await update.message.reply_text(f"Processing... ({'Male' if voice == VOICE_MALE else 'Female'})")
+    await update.message.reply_text("Processing...")
 
     output_file = f"{chat_id}.mp3"
     
+    # Voice ID (မြန်မာအသံ လိုချင်ရင် 'my-MM-ThihaNeural' လို့ ပြောင်းပါ)
+    voice = "my-MM-ThihaNeural" 
+
     try:
         communicate = edge_tts.Communicate(text, voice)
         await communicate.save(output_file)
         
-        # File Size စစ်မယ်
+        # Audio ဖိုင်ရမရ စစ်ဆေးခြင်း
         if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
             await update.message.reply_voice(voice=open(output_file, 'rb'))
-            os.remove(output_file)
+            os.remove(output_file) # ပြီးရင် ဖျက်မယ်
         else:
-            await update.message.reply_text("Error: Audio file creation failed (0 bytes).")
+            await update.message.reply_text("Error: Audio file creation failed.")
 
     except Exception as e:
-        error_msg = str(e)
-        if "No audio was received" in error_msg and voice == VOICE_FEMALE:
-             await update.message.reply_text(
-                 "⚠️ Female Voice Error:\n"
-                 "Microsoft Server မှ အမျိုးသမီးအသံကို ယာယီပိတ်ထားပုံရပါသည်။\n"
-                 "ကျေးဇူးပြု၍ Male Voice ကို ပြောင်းသုံးပေးပါ။"
-             )
-        else:
-            await update.message.reply_text(f"Error: {e}")
-            logging.error(f"TTS Error: {e}")
+        await update.message.reply_text(f"Error: {e}")
+        logging.error(f"TTS Error: {e}")
 
 async def main():
     nest_asyncio.apply()
     application = Application.builder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    # MessageHandler တစ်ခုတည်းက စာကော Button ကော ကိုင်တွယ်မယ်
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_to_speech))
 
     await application.run_polling()
 
 if __name__ == "__main__":
-    keep_alive()
-    asyncio.run(main())
+    keep_alive() # Start Flask server
+    asyncio.run(main()) # Start Bot
