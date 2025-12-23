@@ -4,3 +4,4 @@ flask
 nest_asyncio
 pymongo
 certifi
+dnspython
