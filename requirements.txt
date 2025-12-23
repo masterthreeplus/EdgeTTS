@@ -2,3 +2,5 @@ python-telegram-bot
 edge-tts
 flask
 nest_asyncio
+pymongo
+certifi
