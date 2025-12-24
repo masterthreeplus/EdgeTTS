@@ -2,6 +2,7 @@ import os
 import logging
 import uuid
 import csv
+import time
 import asyncio
 from datetime import datetime, timedelta
 from flask import Flask
@@ -20,7 +21,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running with Queue & Cooldown System!"
+    return "Bot is running with Advanced Logic!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000)) 
@@ -41,13 +42,10 @@ if not TOKEN or not MONGO_URI or not ADMIN_ID:
 ADMIN_ID = int(ADMIN_ID)
 VOICE = "my-MM-ThihaNeural"
 MAX_CHARS = 3000
-COOLDOWN_SECONDS = 30 # တစ်ခါသုံးပြီးရင် စက္ကန့် ၃၀ စောင့်ရမယ်
+COOLDOWN_SECONDS = 30 
 
-# Render Free Plan အတွက် တပြိုင်နက် ၂ ယောက်ပဲ လက်ခံမယ် (ကျန်လူ စောင့်ရမယ်)
+# Queue System (Semaphore)
 CONCURRENT_LIMIT = asyncio.Semaphore(2) 
-
-# User တွေရဲ့ Cooldown မှတ်ဖို့ Memory
-user_cooldowns = {}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -63,7 +61,11 @@ def add_or_update_user(user):
         users_col.update_one(
             {"_id": user_id},
             {
-                "$setOnInsert": {"joined_at": datetime.now(), "generated_count": 0},
+                "$setOnInsert": {
+                    "joined_at": datetime.now(), 
+                    "generated_count": 0,
+                    "last_generated": datetime.min # Cooldown အတွက် Initial Value
+                },
                 "$set": {
                     "name": user.first_name,
                     "username": user.username or "None",
@@ -74,13 +76,34 @@ def add_or_update_user(user):
             upsert=True
         )
     except Exception as e:
-        logging.error(f"MongoDB Error: {e}")
+        logging.exception("MongoDB Update Error")
 
-def increment_usage(user_id):
+def check_cooldown(user_id):
+    """Database ထဲက last_generated ကို စစ်ဆေးခြင်း"""
+    user = users_col.find_one({"_id": user_id}, {"last_generated": 1})
+    if not user: return True # User မရှိသေးရင် Allow
+    
+    last_gen = user.get("last_generated", datetime.min)
+    
+    # အချိန်ကွာခြားချက် တွက်ချက်ခြင်း
+    if (datetime.now() - last_gen).total_seconds() < COOLDOWN_SECONDS:
+        remaining = int(COOLDOWN_SECONDS - (datetime.now() - last_gen).total_seconds())
+        return remaining # စောင့်ရမည့် စက္ကန့် ပြန်ပို့
+    
+    return 0 # 0 ဆိုရင် Allow
+
+def update_usage_stats(user_id):
+    """အောင်မြင်သွားရင် Count တိုးပြီး Time မှတ်မယ်"""
     try:
-        users_col.update_one({"_id": user_id}, {"$inc": {"generated_count": 1}})
+        users_col.update_one(
+            {"_id": user_id},
+            {
+                "$inc": {"generated_count": 1},
+                "$set": {"last_generated": datetime.now()} # Database Cooldown Storage
+            }
+        )
     except Exception as e:
-        logging.error(f"DB Error: {e}")
+        logging.exception("DB Stats Update Error")
 
 def get_all_active_users():
     users = users_col.find({"status": "active"}, {"_id": 1})
@@ -99,8 +122,10 @@ def mark_user_blocked(user_id):
     users_col.update_one({"_id": user_id}, {"$set": {"status": "blocked"}})
 
 def generate_csv_file():
-    filename = "users_list.csv"
+    # Filename Conflict မဖြစ်အောင် Timestamp သုံးမယ်
+    filename = f"users_{int(time.time())}.csv"
     users = users_col.find({})
+    
     with open(filename, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(["User ID", "Name", "Username", "Status", "Joined Date", "Last Active", "Generated Count"])
@@ -132,39 +157,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Fair Usage: တစ်ခါသုံးပြီးရင် {COOLDOWN_SECONDS} စက္ကန့် စောင့်ပေးပါ။"
         )
 
-async def admin_panel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text
+# --- Admin Handlers (Admin Only) ---
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    total, active, blocked, total_gen = get_stats()
+    msg = (
+        f"📈 **Bot Statistics**\n\n"
+        f"👥 Total Users: {total}\n"
+        f"✅ Active Users: {active}\n"
+        f"🚫 Blocked Users: {blocked}\n"
+        f"🔊 Total Generated: {total_gen}"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
-    if user.id != ADMIN_ID:
-        await text_to_speech(update, context) 
-        return
-
-    if text == "📊 Dashboard Stats":
-        total, active, blocked, total_gen = get_stats()
-        msg = (
-            f"📈 **Bot Statistics**\n\n"
-            f"👥 Total Users: {total}\n"
-            f"✅ Active Users: {active}\n"
-            f"🚫 Blocked Users: {blocked}\n"
-            f"🔊 Total Generated: {total_gen}"
-        )
-        await update.message.reply_text(msg, parse_mode="Markdown")
-        
-    elif text == "📂 Export User Data":
-        status_msg = await update.message.reply_text("⏳ Generating CSV...")
-        try:
-            file_path = generate_csv_file()
-            await update.message.reply_document(document=open(file_path, 'rb'), caption="User Data")
-            await status_msg.delete()
+async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status_msg = await update.message.reply_text("⏳ Generating CSV...")
+    file_path = None
+    try:
+        file_path = generate_csv_file()
+        await update.message.reply_document(document=open(file_path, 'rb'), caption="User Data")
+    except Exception as e:
+        logging.exception("Export Error")
+        await status_msg.edit_text(f"Error: {e}")
+    finally:
+        # File Cleanup (သေချာပေါက် ဖျက်မယ့်နေရာ)
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
-        except Exception as e:
-            await status_msg.edit_text(f"Error: {e}")
+            await status_msg.delete()
 
-    elif text == "📢 Broadcast Help":
-        await update.message.reply_text("Reply to a message with `/broadcast` to send to all users.")
-    else:
-        await text_to_speech(update, context)
+async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Reply to a message with `/broadcast` to send to all users.")
 
 async def broadcast_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
@@ -187,39 +208,42 @@ async def broadcast_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Forbidden:
             mark_user_blocked(user_id)
             blocked += 1
-        except Exception: pass
-        await asyncio.sleep(0.05) # Spam limit
+        except Exception: 
+            logging.exception(f"Broadcast error for {user_id}")
+        
+        # Broadcast Safe Limit (0.15s)
+        await asyncio.sleep(0.15) 
 
     await status_msg.edit_text(f"✅ Broadcast Done!\nSent: {success}, Blocked: {blocked}")
 
+# --- Text Handler (General Users) ---
 async def text_to_speech(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_or_update_user(user)
     text = update.message.text
-    if not text or text in ["📊 Dashboard Stats", "📢 Broadcast Help", "📂 Export User Data"]: return
+    
+    # စာမရှိရင် Return
+    if not text: return 
 
     # 1. Check Character Limit
     if len(text) > MAX_CHARS:
         await update.message.reply_text(f"❌ စာလုံးရေများလွန်းသည် ({len(text)}/{MAX_CHARS})")
         return
 
-    # 2. Check Cooldown (Fairness)
-    last_used = user_cooldowns.get(user.id)
-    if last_used:
-        elapsed = (datetime.now() - last_used).total_seconds()
-        if elapsed < COOLDOWN_SECONDS:
-            wait_time = int(COOLDOWN_SECONDS - elapsed)
-            await update.message.reply_text(f"⏳ Fair Usage: ကျေးဇူးပြု၍ {wait_time} စက္ကန့် စောင့်ပေးပါ။")
-            return
+    # 2. Check Cooldown from DB
+    remaining_time = check_cooldown(user.id)
+    if remaining_time > 0:
+        await update.message.reply_text(f"⏳ Fair Usage: ကျေးဇူးပြု၍ {remaining_time} စက္ကန့် စောင့်ပေးပါ။")
+        return
 
     status_msg = await update.message.reply_text("Processing... (Queue ဝင်နေပါသည်)")
-    
-    # 3. Queue System (Semaphore) - တပြိုင်နက် ၂ ယောက်ပဲ လုပ်ခွင့်ပြုမည်
-    async with CONCURRENT_LIMIT:
-        await status_msg.edit_text("Generating Audio... 🎵")
-        output_file = f"{uuid.uuid4()}.mp3"
-        
-        try:
+    output_file = f"{uuid.uuid4()}.mp3"
+
+    try:
+        # 3. Queue System
+        async with CONCURRENT_LIMIT:
+            await status_msg.edit_text("Generating Audio... 🎵")
+            
             communicate = edge_tts.Communicate(text, VOICE)
             await communicate.save(output_file)
             
@@ -231,23 +255,43 @@ async def text_to_speech(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         performer="Bot AI"
                     )
                 
-                # Update Cooldown & Stats
-                user_cooldowns[user.id] = datetime.now()
-                increment_usage(user.id)
-                
-                os.remove(output_file)
-                await status_msg.delete()
+                # Success: Update stats & cooldown in DB
+                update_usage_stats(user.id)
             else:
                 await status_msg.edit_text("Error: Audio file empty.")
 
-        except Exception as e:
-            await status_msg.edit_text(f"Error: {e}")
+    except Exception as e:
+        logging.exception("TTS Generation Error")
+        await status_msg.edit_text("Sorry, an error occurred during generation.")
+    
+    finally:
+        # 4. File Cleanup (အရေးအကြီးဆုံး ပြင်ဆင်ချက်)
+        # Error တက်တက်၊ မတက်တက် ဖိုင်ကျန်နေရင် ဖျက်မယ်
+        if os.path.exists(output_file):
+            os.remove(output_file)
+        
+        # Processing message ကို ဖျက်မယ် (Optional)
+        try:
+            await status_msg.delete()
+        except:
+            pass
 
 def main():
     application = Application.builder().token(TOKEN).build()
+    
+    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("broadcast", broadcast_reply))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel_handler))
+    
+    # Admin Handlers (Admin ID စစ်ပြီးမှ အလုပ်လုပ်မည် - Conflict မဖြစ်တော့ပါ)
+    # Filter: Text Match AND User is Admin
+    application.add_handler(MessageHandler(filters.Regex("^📊 Dashboard Stats$") & filters.User(ADMIN_ID), admin_stats))
+    application.add_handler(MessageHandler(filters.Regex("^📂 Export User Data$") & filters.User(ADMIN_ID), admin_export))
+    application.add_handler(MessageHandler(filters.Regex("^📢 Broadcast Help$") & filters.User(ADMIN_ID), admin_help))
+
+    # General Text Handler (Admin Command တွေ မပါတော့ပါ)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_to_speech))
+
     application.run_polling()
 
 if __name__ == "__main__":
