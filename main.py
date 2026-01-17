@@ -232,9 +232,8 @@ async def show_voice_selection(update: Update, context: ContextTypes.DEFAULT_TYP
         f"🔊 **Voice Selection**\n\n"
         f"Current voice: **{current_display}**\n\n"
         f"အောက်ပါအသံများမှ ရွေးချယ်နိုင်ပါသည်:\n"
-        f"• **Thiha (Male)** - အထူးသဖြင့် သတင်းဖတ်ခြင်းအတွက် ကောင်းမွန်သည်\n"
-        f"• **Nilar (Female)** - သဘာဝကျသော အမျိုးသမီးအသံ\n\n"
-        f"သင် ရွေးချယ်ထားသောအသံကို database တွင် သိမ်းဆည်းထားပြီး ပြန်မပြောင်းသမျှကာလပတ်လုံး အသုံးပြုပါမည်။"
+        f"• **Thiha (Male)** -\n"
+        f"• **Nilar (Female)**\n"
     )
     
     if update.callback_query:
@@ -282,9 +281,7 @@ async def voice_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     if success:
         await query.edit_message_text(
             f"✅ **Voice changed successfully!**\n\n"
-            f"Your voice has been set to: **{voice_name}**\n\n"
-            f"ဤအသံကို သင်ပြန်မပြောင်းမချင်းထိ သင်၏ text-to-speech အတွက် အသုံးပြုပါမည်။\n\n"
-            f"အသံအသစ်ဖြင့် စမ်းသပ်ရန် မည်သည့်စာသားမဆို ပို့ပေးပါ။",
+            f"Your voice has been set to: **{voice_name}**\n\n",
             parse_mode="Markdown"
         )
     else:
