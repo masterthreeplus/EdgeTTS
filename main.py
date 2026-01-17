@@ -232,7 +232,7 @@ async def show_voice_selection(update: Update, context: ContextTypes.DEFAULT_TYP
         f"🔊 **Voice Selection**\n\n"
         f"Current voice: **{current_display}**\n\n"
         f"အောက်ပါအသံများမှ ရွေးချယ်နိုင်ပါသည်:\n"
-        f"• **Thiha (Male)** -\n"
+        f"• **Thiha (Male)**\n"
         f"• **Nilar (Female)**\n"
     )
     
