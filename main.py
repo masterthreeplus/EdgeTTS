@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
 import edge_tts
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.error import Forbidden
 
 # MongoDB Driver
@@ -40,7 +40,18 @@ if not TOKEN or not MONGO_URI or not ADMIN_ID:
     raise ValueError("Missing Config Variables!")
 
 ADMIN_ID = int(ADMIN_ID)
-VOICE = "my-MM-ThihaNeural"
+
+# Voice Configuration
+AVAILABLE_VOICES = {
+    "male": "my-MM-ThihaNeural",
+    "female": "my-MM-NilarNeural"
+}
+DEFAULT_VOICE = "my-MM-ThihaNeural"
+VOICE_DISPLAY_NAMES = {
+    "my-MM-ThihaNeural": "Thiha (Male)",
+    "my-MM-NilarNeural": "Nilar (Female)"
+}
+
 MAX_CHARS = 3000
 COOLDOWN_SECONDS = 30 
 
@@ -64,7 +75,8 @@ def add_or_update_user(user):
                 "$setOnInsert": {
                     "joined_at": datetime.now(), 
                     "generated_count": 0,
-                    "last_generated": datetime.min # Cooldown အတွက် Initial Value
+                    "last_generated": datetime.min, # Cooldown အတွက် Initial Value
+                    "voice_preference": DEFAULT_VOICE  # New field for voice preference
                 },
                 "$set": {
                     "name": user.first_name,
@@ -105,6 +117,25 @@ def update_usage_stats(user_id):
     except Exception as e:
         logging.exception("DB Stats Update Error")
 
+def update_voice_preference(user_id, voice_code):
+    """User ရဲ့ voice preference ကို update လုပ်မယ်"""
+    try:
+        users_col.update_one(
+            {"_id": user_id},
+            {"$set": {"voice_preference": voice_code}}
+        )
+        return True
+    except Exception as e:
+        logging.exception("DB Voice Update Error")
+        return False
+
+def get_user_voice_preference(user_id):
+    """User ရဲ့ voice preference ကို ထုတ်ယူမယ်"""
+    user = users_col.find_one({"_id": user_id}, {"voice_preference": 1})
+    if user and user.get("voice_preference"):
+        return user["voice_preference"]
+    return DEFAULT_VOICE
+
 def get_all_active_users():
     users = users_col.find({"status": "active"}, {"_id": 1})
     return [user["_id"] for user in users]
@@ -128,12 +159,13 @@ def generate_csv_file():
     
     with open(filename, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(["User ID", "Name", "Username", "Status", "Joined Date", "Last Active", "Generated Count"])
+        writer.writerow(["User ID", "Name", "Username", "Status", "Joined Date", "Last Active", "Generated Count", "Voice Preference"])
         for user in users:
             writer.writerow([
                 user["_id"], user.get("name", "N/A"), user.get("username", "None"),
                 user.get("status", "unknown"), user.get("joined_at", "N/A"),
-                user.get("last_active", "N/A"), user.get("generated_count", 0)
+                user.get("last_active", "N/A"), user.get("generated_count", 0),
+                user.get("voice_preference", "N/A")
             ])
     return filename
 
@@ -146,26 +178,143 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id == ADMIN_ID:
         admin_keyboard = [
             [KeyboardButton("📊 Dashboard Stats"), KeyboardButton("📂 Export User Data")],
-            [KeyboardButton("📢 Broadcast Help")]
+            [KeyboardButton("📢 Broadcast Help"), KeyboardButton("🔊 Voices")]
         ]
-        reply_markup = ReplyKeyboardMarkup(admin_keyboard, resize_keyboard=True)
-        await update.message.reply_text(f"Welcome Admin {user.first_name}!", reply_markup=reply_markup)
+        reply_markup = ReplyKeyboardMarkup(admin_keyboard, resize_keyboard=True, one_time_keyboard=False)
+        await update.message.reply_text(
+            f"Welcome Admin {user.first_name}!\n\n"
+            f"🔊 Current voice: {VOICE_DISPLAY_NAMES.get(get_user_voice_preference(user.id), 'Thiha (Male)')}",
+            reply_markup=reply_markup
+        )
+    else:
+        user_keyboard = [[KeyboardButton("🔊 Voices")]]
+        reply_markup = ReplyKeyboardMarkup(user_keyboard, resize_keyboard=True, one_time_keyboard=False)
+        
+        current_voice = get_user_voice_preference(user.id)
+        voice_display = VOICE_DISPLAY_NAMES.get(current_voice, "Thiha (Male)")
+        
+        await update.message.reply_text(
+            f"မင်္ဂလာပါ {user.first_name}!\n\n"
+            f"🔊 Current voice: {voice_display}\n\n"
+            f"ဤဘော့သည် စာလုံးရေ {MAX_CHARS} အထိ အသံဖိုင် (MP3) ပြောင်းပေးပါသည်။\n"
+            f"Fair Usage: တစ်ခါသုံးပြီးရင် {COOLDOWN_SECONDS} စက္ကန့် စောင့်ပေးပါ။\n\n"
+            f"အသံရွေးချယ်ရန် '🔊 Voices' ခလုတ်ကို နှိပ်ပါ။",
+            reply_markup=reply_markup
+        )
+
+async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command /voice အတွက် handler"""
+    user = update.effective_user
+    await show_voice_selection(update, context, user.id)
+
+async def voices_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Voices button ကိုနှိပ်တဲ့အခါ"""
+    user = update.effective_user
+    await show_voice_selection(update, context, user.id)
+
+async def show_voice_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id):
+    """Voice selection inline keyboard ကိုပြသမယ်"""
+    current_voice = get_user_voice_preference(user_id)
+    
+    # Create inline keyboard with two voice options
+    keyboard = [
+        [
+            InlineKeyboardButton("🗣️ Thiha (Male)", callback_data=f"voice_male_{user_id}"),
+            InlineKeyboardButton("👩 Nilar (Female)", callback_data=f"voice_female_{user_id}")
+        ]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    current_display = VOICE_DISPLAY_NAMES.get(current_voice, "Thiha (Male)")
+    
+    message_text = (
+        f"🔊 **Voice Selection**\n\n"
+        f"Current voice: **{current_display}**\n\n"
+        f"အောက်ပါအသံများမှ ရွေးချယ်နိုင်ပါသည်:\n"
+        f"• **Thiha (Male)** - အထူးသဖြင့် သတင်းဖတ်ခြင်းအတွက် ကောင်းမွန်သည်\n"
+        f"• **Nilar (Female)** - သဘာဝကျသော အမျိုးသမီးအသံ\n\n"
+        f"သင် ရွေးချယ်ထားသောအသံကို database တွင် သိမ်းဆည်းထားပြီး ပြန်မပြောင်းသမျှကာလပတ်လုံး အသုံးပြုပါမည်။"
+    )
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=message_text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
     else:
         await update.message.reply_text(
-            f"မင်္ဂလာပါ {user.first_name}!\n"
-            f"စာလုံးရေ {MAX_CHARS} အထိ အသံဖိုင် (MP3) ပြောင်းပေးပါတယ်။\n"
-            f"Fair Usage: တစ်ခါသုံးပြီးရင် {COOLDOWN_SECONDS} စက္ကန့် စောင့်ပေးပါ။"
+            text=message_text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+
+async def voice_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inline keyboard မှာ voice ရွေးတဲ့အခါ"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    callback_data = query.data
+    
+    # Extract voice type and user ID from callback data
+    if callback_data.startswith("voice_male_"):
+        voice_code = AVAILABLE_VOICES["male"]
+        voice_name = "Thiha (Male)"
+        callback_user_id = int(callback_data.replace("voice_male_", ""))
+    elif callback_data.startswith("voice_female_"):
+        voice_code = AVAILABLE_VOICES["female"]
+        voice_name = "Nilar (Female)"
+        callback_user_id = int(callback_data.replace("voice_female_", ""))
+    else:
+        await query.edit_message_text("Invalid selection")
+        return
+    
+    # Check if the user who clicked is the same as in callback data
+    if user_id != callback_user_id:
+        await query.edit_message_text("ကျေးဇူးပြု၍ မိမိ၏အသံကိုသာ ပြောင်းလဲနိုင်ပါသည်။")
+        return
+    
+    # Update voice preference in database
+    success = update_voice_preference(user_id, voice_code)
+    
+    if success:
+        await query.edit_message_text(
+            f"✅ **Voice changed successfully!**\n\n"
+            f"Your voice has been set to: **{voice_name}**\n\n"
+            f"ဤအသံကို သင်ပြန်မပြောင်းမချင်းထိ သင်၏ text-to-speech အတွက် အသုံးပြုပါမည်။\n\n"
+            f"အသံအသစ်ဖြင့် စမ်းသပ်ရန် မည်သည့်စာသားမဆို ပို့ပေးပါ။",
+            parse_mode="Markdown"
+        )
+    else:
+        await query.edit_message_text(
+            "❌ အမှားတစ်ခုခုဖြစ်နေပါသည်။ ကျေးဇူးပြု၍ နောက်မှထပ်ကြိုးစားကြည့်ပါ။"
         )
 
 # --- Admin Handlers (Admin Only) ---
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total, active, blocked, total_gen = get_stats()
+    
+    # Get voice usage statistics
+    voice_stats_pipeline = [
+        {"$group": {"_id": "$voice_preference", "count": {"$sum": 1}}}
+    ]
+    voice_stats = list(users_col.aggregate(voice_stats_pipeline))
+    
+    voice_stats_text = ""
+    for stat in voice_stats:
+        voice_code = stat["_id"] or "Not Set"
+        voice_display = VOICE_DISPLAY_NAMES.get(voice_code, voice_code)
+        voice_stats_text += f"• {voice_display}: {stat['count']} users\n"
+    
     msg = (
         f"📈 **Bot Statistics**\n\n"
         f"👥 Total Users: {total}\n"
         f"✅ Active Users: {active}\n"
         f"🚫 Blocked Users: {blocked}\n"
-        f"🔊 Total Generated: {total_gen}"
+        f"🔊 Total Generated: {total_gen}\n\n"
+        f"**Voice Preferences:**\n{voice_stats_text}"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -174,7 +323,7 @@ async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_path = None
     try:
         file_path = generate_csv_file()
-        await update.message.reply_document(document=open(file_path, 'rb'), caption="User Data")
+        await update.message.reply_document(document=open(file_path, 'rb'), caption="User Data with Voice Preferences")
     except Exception as e:
         logging.exception("Export Error")
         await status_msg.edit_text(f"Error: {e}")
@@ -236,15 +385,19 @@ async def text_to_speech(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⏳ Fair Usage: ကျေးဇူးပြု၍ {remaining_time} စက္ကန့် စောင့်ပေးပါ။")
         return
 
-    status_msg = await update.message.reply_text("Processing... (Queue ဝင်နေပါသည်)")
+    # Get user's voice preference
+    selected_voice = get_user_voice_preference(user.id)
+    voice_display = VOICE_DISPLAY_NAMES.get(selected_voice, "Thiha (Male)")
+    
+    status_msg = await update.message.reply_text(f"Processing with {voice_display}... (Queue ဝင်နေပါသည်)")
     output_file = f"{uuid.uuid4()}.mp3"
 
     try:
         # 3. Queue System
         async with CONCURRENT_LIMIT:
-            await status_msg.edit_text("Generating Audio... 🎵")
+            await status_msg.edit_text(f"Generating Audio with {voice_display}... 🎵")
             
-            communicate = edge_tts.Communicate(text, VOICE)
+            communicate = edge_tts.Communicate(text, selected_voice)
             await communicate.save(output_file)
             
             if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
@@ -252,7 +405,8 @@ async def text_to_speech(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_audio(
                         audio=audio, 
                         title=f"Voice-{datetime.now().strftime('%H%M%S')}",
-                        performer="Bot AI"
+                        performer=f"Bot AI ({voice_display})",
+                        caption=f"Generated with {voice_display}"
                     )
                 
                 # Success: Update stats & cooldown in DB
@@ -279,16 +433,22 @@ async def text_to_speech(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     application = Application.builder().token(TOKEN).build()
     
-    # Handlers
+    # Command Handlers
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("voice", voice_command))
     application.add_handler(CommandHandler("broadcast", broadcast_reply))
     
-    # Admin Handlers (Admin ID စစ်ပြီးမှ အလုပ်လုပ်မည် - Conflict မဖြစ်တော့ပါ)
-    # Filter: Text Match AND User is Admin
+    # Button Handlers
+    application.add_handler(MessageHandler(filters.Regex("^🔊 Voices$"), voices_button_handler))
+    
+    # Admin Handlers (Admin ID စစ်ပြီးမှ အလုပ်လုပ်မည်)
     application.add_handler(MessageHandler(filters.Regex("^📊 Dashboard Stats$") & filters.User(ADMIN_ID), admin_stats))
     application.add_handler(MessageHandler(filters.Regex("^📂 Export User Data$") & filters.User(ADMIN_ID), admin_export))
     application.add_handler(MessageHandler(filters.Regex("^📢 Broadcast Help$") & filters.User(ADMIN_ID), admin_help))
-
+    
+    # Callback Query Handler (Voice selection)
+    application.add_handler(CallbackQueryHandler(voice_callback_handler, pattern="^voice_"))
+    
     # General Text Handler (Admin Command တွေ မပါတော့ပါ)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_to_speech))
 
